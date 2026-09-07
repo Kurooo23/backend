@@ -1,26 +1,28 @@
+// backend/server.js
+
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { initDatabase } from './config/db.js';
-import turnamenRoutes from './routes/turnamenRoutes.js';
-import pesertaRoutes from './routes/pesertaRoutes.js';
-import pertandinganRoutes from './routes/pertandinganRoutes.js';
 import authRoutes from './routes/authRoutes.js';
+import turnamenRoutes from './routes/turnamenRoutes.js';
+import pertandinganRoutes from './routes/pertandinganRoutes.js';
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Inisialisasi SQLite Table
-initDatabase();
-
-// Routes REST API Turnamen & Autentikasi
 app.use('/api/auth', authRoutes);
-app.use('/auth', authRoutes); // Alias
 app.use('/api/turnamen', turnamenRoutes);
-app.use('/api/peserta', pesertaRoutes);
 app.use('/api/pertandingan', pertandinganRoutes);
+
+app.get('/', (_, res) => {
+  res.json({
+    name: 'RivNet Turnamen API',
+    status: 'running',
+    storage: 'Supabase',
+  });
+});
 
 // Health Check & Documentation
 app.get('/', (req, res) => {

@@ -1,19 +1,11 @@
-export function successResponse({ message = "OK", data = null } = {}) {
-  const response = {
-    status: "success",
-    message,
-  };
-  if (data !== null) {
-    response.data = data;
-  }
-  return response;
+// backend/models/apiResponse.js
+
+export function successResponse({ message = 'OK', data = null } = {}) {
+  return data === null
+    ? { status: 'success', message }
+    : { status: 'success', message, data };
 }
 
-export function errorResponse({
-  message = "Error",
-} = {}) {
-  return {
-    status: "error",
-    message
-  };
+export function errorResponse({ message = 'Error' } = {}) {
+  return { status: 'error', message };
 }

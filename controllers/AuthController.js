@@ -1,55 +1,107 @@
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
-import { db } from '../config/db.js';
+import { supabase, supabaseAdmin } from '../config/db.js';
 import { successResponse, errorResponse } from '../models/apiResponse.js';
+
+const validPassword = (password) =>
+  password.length >= 8 &&
+  /[A-Z]/.test(password) &&
+  /[a-z]/.test(password) &&
+  /[0-9]/.test(password) &&
+  /[@#$!_-]/.test(password);
 
 export const register = async (req, res) => {
   try {
     const { email, password, nickname, avatar_index = 0 } = req.body;
+    const username = nickname?.trim();
+    const normalizedEmail = email?.trim().toLowerCase();
 
-    if (!email || !password || !nickname) {
-      return res.status(400).json(errorResponse({
-        message: 'Email, password, dan nickname wajib diisi.'
-      }));
+    if (!normalizedEmail || !username || !password) {
+      return res.status(400).json(
+        errorResponse({ message: 'Email, nickname, dan kata sandi wajib diisi.' }),
+      );
     }
 
-    // Cek apakah email sudah terdaftar di SQLite
-    const existingUser = db.prepare('SELECT id_user FROM users WHERE email = ?').get(email.trim().toLowerCase());
-    if (existingUser) {
-      return res.status(400).json(errorResponse({
-        message: 'Email sudah terdaftar. Silakan gunakan email lain atau langsung masuk.'
-      }));
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return res.status(400).json(
+        errorResponse({
+          message: 'Nickname harus 3–20 karakter dan hanya boleh huruf, angka, atau underscore.',
+        }),
+      );
     }
 
-    const id_user = uuidv4();
-    const hashedPassword = bcrypt.hashSync(password, 10);
-    const createdAt = new Date().toISOString();
-    const avatarIdx = Number(avatar_index) || 0;
+    if (!validPassword(password)) {
+      return res.status(400).json(
+        errorResponse({
+          message: 'Kata sandi minimal 8 karakter serta wajib memiliki huruf besar, huruf kecil, angka, dan simbol (@ # $ ! _ -).',
+        }),
+      );
+    }
 
-    // Simpan ke SQLite
-    db.prepare(`
-      INSERT INTO users (id_user, email, password, nickname, avatar_index, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id_user, email.trim().toLowerCase(), hashedPassword, nickname.trim(), avatarIdx, createdAt);
+    const { data: nicknameUsed, error: nicknameError } = await supabaseAdmin
+      .from('user')
+      .select('id')
+      .ilike('username', username)
+      .maybeSingle();
 
-    const createdUser = {
-      id_user,
-      email: email.trim().toLowerCase(),
-      nickname: nickname.trim(),
-      avatar_index: avatarIdx,
-      created_at: createdAt
+    if (nicknameError) throw nicknameError;
+
+    if (nicknameUsed) {
+      return res.status(400).json(
+        errorResponse({ message: 'Nickname sudah digunakan.' }),
+      );
+    }
+
+    const options = {
+      data: {
+        username,
+        avatar_index: Number(avatar_index) || 0,
+      },
     };
 
-    return res.status(201).json(successResponse({
-      message: 'Pendaftaran berhasil! Silakan masuk.',
-      data: { user: createdUser }
-    }));
+    if (process.env.EMAIL_REDIRECT_URL) {
+      options.emailRedirectTo = process.env.EMAIL_REDIRECT_URL;
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: normalizedEmail,
+      password,
+      options,
+    });
+
+    if (error) {
+      return res.status(400).json(errorResponse({ message: error.message }));
+    }
+
+    if (!data.user || data.user.identities?.length === 0) {
+      return res.status(400).json(
+        errorResponse({ message: 'Email sudah terdaftar.' }),
+      );
+    }
+
+    const { error: profileError } = await supabaseAdmin.from('user').insert({
+      id: data.user.id,
+      username,
+      avatar_index: Number(avatar_index) || 0,
+    });
+
+    if (profileError) throw profileError;
+
+    return res.status(201).json(
+      successResponse({
+        message: 'Pendaftaran berhasil. Silakan verifikasi email Anda.',
+        data: {
+          user: {
+            id_user: data.user.id,
+            email: normalizedEmail,
+            nickname: username,
+            avatar_index: Number(avatar_index) || 0,
+          },
+        },
+      }),
+    );
   } catch (error) {
-    console.error('Error register:', error);
-    return res.status(500).json(errorResponse({
-      message: error.message || 'Terjadi kesalahan saat mendaftar.'
-    }));
+    return res.status(500).json(
+      errorResponse({ message: error.message || 'Pendaftaran gagal.' }),
+    );
   }
 };
 
@@ -57,61 +109,46 @@ export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json(errorResponse({
-        message: 'Email dan password wajib diisi.'
-      }));
-    }
-
-    // Cari user berdasarkan email
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
-    if (!user) {
-      return res.status(401).json(errorResponse({
-        message: 'Email atau password salah.'
-      }));
-    }
-
-    // Verifikasi password
-    const isPasswordValid = bcrypt.compareSync(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json(errorResponse({
-        message: 'Email atau password salah.'
-      }));
-    }
-
-    // Generate JWT token
-    const secret = process.env.JWT_SECRET || 'rivnet_secret_key_2026';
-    const token = jwt.sign(
-      {
-        id_user: user.id_user,
-        email: user.email,
-        nickname: user.nickname
-      },
-      secret,
-      { expiresIn: '30d' }
-    );
-
-    const userData = {
-      id_user: user.id_user,
-      email: user.email,
-      nickname: user.nickname,
-      avatar_index: user.avatar_index
-    };
-
-    return res.json({
-      success: true,
-      status: 'success',
-      message: 'Login berhasil',
-      token,
-      data: {
-        token,
-        user: userData
-      }
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email?.trim().toLowerCase(),
+      password,
     });
+
+    if (error || !data.session || !data.user) {
+      return res.status(401).json(
+        errorResponse({
+          message: 'Email atau password salah. Pastikan email sudah diverifikasi.',
+        }),
+      );
+    }
+
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('user')
+      .select('*')
+      .eq('id', data.user.id)
+      .single();
+
+    if (profileError) throw profileError;
+
+    return res.json(
+      successResponse({
+        message: 'Login berhasil.',
+        data: {
+          token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at,
+          user: {
+            id_user: data.user.id,
+            email: data.user.email,
+            nickname: profile.username,
+            avatar_index: profile.avatar_index,
+          },
+        },
+      }),
+    );
   } catch (error) {
-    console.error('Error login:', error);
-    return res.status(500).json(errorResponse({
-      message: error.message || 'Terjadi kesalahan saat login.'
-    }));
+    return res.status(500).json(
+      errorResponse({ message: error.message || 'Login gagal.' }),
+    );
   }
 };

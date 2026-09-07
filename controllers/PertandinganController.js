@@ -1,132 +1,128 @@
-import { db, supabase } from '../config/db.js';
+// backend/controllers/PertandinganController.js
+
+import { supabaseAdmin } from '../config/db.js';
 import { successResponse, errorResponse } from '../models/apiResponse.js';
 
-export const getPertandinganByTurnamen = (req, res) => {
-  try {
-    const { idTurnamen } = req.params;
-    const pertandingan = db.prepare(`
-      SELECT 
-        m.*,
-        p1.nama_peserta AS nama_peserta_1,
-        p2.nama_peserta AS nama_peserta_2
-      FROM pertandingan m
-      LEFT JOIN peserta p1 ON m.id_peserta_1 = p1.id_peserta
-      LEFT JOIN peserta p2 ON m.id_peserta_2 = p2.id_peserta
-      WHERE m.id_turnamen = ?
-      ORDER BY m.urutan ASC
-    `).all(idTurnamen);
+const fail = (error) => {
+  if (error) throw error;
+};
 
-    return res.json(successResponse({ data: pertandingan }));
+const withUserNames = async (matches) => {
+  const ids = [
+    ...new Set(
+      matches.flatMap((match) => [match.id_user_1, match.id_user_2]).filter(Boolean),
+    ),
+  ];
+
+  if (ids.length === 0) return matches;
+
+  const { data: users, error } = await supabaseAdmin
+    .from('user')
+    .select('id, username')
+    .in('id', ids);
+
+  fail(error);
+
+  const names = Object.fromEntries(users.map((user) => [user.id, user.username]));
+
+  return matches.map((match) => ({
+    ...match,
+    nama_user_1: names[match.id_user_1] ?? null,
+    nama_user_2: names[match.id_user_2] ?? null,
+  }));
+};
+
+export const getPertandinganByTurnamen = async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('pertandingan')
+      .select('*')
+      .eq('id_turnamen', req.params.idTurnamen)
+      .order('babak');
+
+    fail(error);
+
+    return res.json(successResponse({ data: await withUserNames(data) }));
   } catch (error) {
     return res.status(500).json(errorResponse({ message: error.message }));
   }
 };
 
-export const getPertandinganById = (req, res) => {
+export const getPertandinganById = async (req, res) => {
   try {
-    const { id } = req.params;
-    const match = db.prepare(`
-      SELECT 
-        m.*,
-        p1.nama_peserta AS nama_peserta_1,
-        p2.nama_peserta AS nama_peserta_2
-      FROM pertandingan m
-      LEFT JOIN peserta p1 ON m.id_peserta_1 = p1.id_peserta
-      LEFT JOIN peserta p2 ON m.id_peserta_2 = p2.id_peserta
-      WHERE m.id_pertandingan = ?
-    `).get(id);
+    const { data, error } = await supabaseAdmin
+      .from('pertandingan')
+      .select('*')
+      .eq('id_pertandingan', req.params.id)
+      .maybeSingle();
+
+    fail(error);
+
+    if (!data) {
+      return res.status(404).json(
+        errorResponse({ message: 'Pertandingan tidak ditemukan.' }),
+      );
+    }
+
+    return res.json(successResponse({ data: (await withUserNames([data]))[0] }));
+  } catch (error) {
+    return res.status(500).json(errorResponse({ message: error.message }));
+  }
+};
+
+export const updateSkorPertandingan = async (req, res) => {
+  try {
+    const { data: match, error: matchError } = await supabaseAdmin
+      .from('pertandingan')
+      .select('*, turnamen(id_pemilik)')
+      .eq('id_pertandingan', req.params.id)
+      .maybeSingle();
+
+    fail(matchError);
 
     if (!match) {
-      return res.status(404).json(errorResponse({ message: 'Pertandingan tidak ditemukan' }));
+      return res.status(404).json(
+        errorResponse({ message: 'Pertandingan tidak ditemukan.' }),
+      );
     }
 
-    return res.json(successResponse({ data: match }));
-  } catch (error) {
-    return res.status(500).json(errorResponse({ message: error.message }));
-  }
-};
-
-export const updateSkorPertandingan = (req, res) => {
-  try {
-    const { id } = req.params;
-    const { skor_peserta_1, skor_peserta_2, status = 'Selesai' } = req.body;
-
-    const currentMatch = db.prepare('SELECT * FROM pertandingan WHERE id_pertandingan = ?').get(id);
-    if (!currentMatch) {
-      return res.status(404).json(errorResponse({ message: 'Pertandingan tidak ditemukan' }));
+    if (match.turnamen.id_pemilik !== req.user.id) {
+      return res.status(403).json(
+        errorResponse({
+          message: 'Hanya pemilik turnamen yang dapat memasukkan skor.',
+        }),
+      );
     }
 
-    const s1 = Number(skor_peserta_1 ?? currentMatch.skor_peserta_1);
-    const s2 = Number(skor_peserta_2 ?? currentMatch.skor_peserta_2);
+    const skor1 = Number(req.body.skor_user_1);
+    const skor2 = Number(req.body.skor_user_2);
 
-    const updateTransaction = db.transaction(() => {
-      // 1. Update skor & status pertandingan ini
-      db.prepare(`
-        UPDATE pertandingan
-        SET skor_peserta_1 = ?, skor_peserta_2 = ?, status = ?
-        WHERE id_pertandingan = ?
-      `).run(s1, s2, status, id);
+    if (!Number.isInteger(skor1) || !Number.isInteger(skor2) || skor1 < 0 || skor2 < 0) {
+      return res.status(400).json(
+        errorResponse({ message: 'Skor harus berupa angka nol atau lebih.' }),
+      );
+    }
 
-      // 2. Ubah status turnamen ke 'Berlangsung' jika masih 'Akan Datang'
-      db.prepare(`
-        UPDATE turnamen
-        SET status = 'Berlangsung'
-        WHERE id_turnamen = ? AND status = 'Akan Datang'
-      `).run(currentMatch.id_turnamen);
+    const { data, error } = await supabaseAdmin
+      .from('pertandingan')
+      .update({
+        skor_user_1: skor1,
+        skor_user_2: skor2,
+        status: req.body.status || 'Selesai',
+      })
+      .eq('id_pertandingan', req.params.id)
+      .select()
+      .single();
 
-      // 3. Jika pertandingan selesai dan ada laga lanjutan di bracket, majukan pemenang
-      if (status === 'Selesai' && currentMatch.next_pertandingan_id) {
-        let winnerId = null;
-        if (s1 > s2) winnerId = currentMatch.id_peserta_1;
-        else if (s2 > s1) winnerId = currentMatch.id_peserta_2;
+    fail(error);
 
-        if (winnerId) {
-          const siblings = db.prepare(`
-            SELECT id_pertandingan FROM pertandingan
-            WHERE next_pertandingan_id = ?
-            ORDER BY urutan ASC
-          `).all(currentMatch.next_pertandingan_id);
-
-          if (siblings.length > 0) {
-            const isSlot1 = siblings[0].id_pertandingan === id;
-            const updateField = isSlot1 ? 'id_peserta_1' : 'id_peserta_2';
-
-            db.prepare(`
-              UPDATE pertandingan
-              SET ${updateField} = ?
-              WHERE id_pertandingan = ?
-            `).run(winnerId, currentMatch.next_pertandingan_id);
-          }
-        }
-      }
-
-      // 4. Cek apakah seluruh pertandingan pada turnamen ini sudah selesai
-      const allMatches = db.prepare('SELECT status FROM pertandingan WHERE id_turnamen = ?').all(currentMatch.id_turnamen);
-      const isAllFinished = allMatches.length > 0 && allMatches.every(m => m.status === 'Selesai');
-      if (isAllFinished) {
-        db.prepare("UPDATE turnamen SET status = 'Selesai' WHERE id_turnamen = ?").run(currentMatch.id_turnamen);
-      }
-    });
-
-    updateTransaction();
-
-    const updatedMatch = db.prepare(`
-      SELECT 
-        m.*,
-        p1.nama_peserta AS nama_peserta_1,
-        p2.nama_peserta AS nama_peserta_2
-      FROM pertandingan m
-      LEFT JOIN peserta p1 ON m.id_peserta_1 = p1.id_peserta
-      LEFT JOIN peserta p2 ON m.id_peserta_2 = p2.id_peserta
-      WHERE m.id_pertandingan = ?
-    `).get(id);
-
-    return res.json(successResponse({
-      message: 'Hasil skor pertandingan berhasil diperbarui',
-      data: updatedMatch
-    }));
+    return res.json(
+      successResponse({
+        message: 'Skor pertandingan berhasil diperbarui.',
+        data,
+      }),
+    );
   } catch (error) {
-    console.error('Error updateSkorPertandingan:', error);
     return res.status(500).json(errorResponse({ message: error.message }));
   }
 };
