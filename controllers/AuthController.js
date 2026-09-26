@@ -72,8 +72,34 @@ export const register = async (req, res) => {
     }
 
     if (!data.user || data.user.identities?.length === 0) {
-      return res.status(400).json(
-        errorResponse({ message: 'Email sudah terdaftar.' }),
+      const options = {};
+
+      if (process.env.EMAIL_REDIRECT_URL) {
+        options.emailRedirectTo = process.env.EMAIL_REDIRECT_URL;
+      }
+
+      const { error: resendError } = await supabase.auth.resend({
+        type: 'signup',
+        email: normalizedEmail,
+        options,
+      });
+
+      if (resendError) {
+        return res.status(429).json(
+          errorResponse({
+            message: resendError.message,
+          }),
+        );
+      }
+
+      return res.status(200).json(
+        successResponse({
+          message:
+            'Email sudah terdaftar tetapi belum diverifikasi. Email verifikasi baru telah dikirim.',
+          data: {
+            email_verification_required: true,
+          },
+        }),
       );
     }
 
@@ -149,6 +175,52 @@ export const login = async (req, res) => {
   } catch (error) {
     return res.status(500).json(
       errorResponse({ message: error.message || 'Login gagal.' }),
+    );
+  }
+};
+
+export const resendVerification = async (req, res) => {
+  try {
+    const email = req.body.email?.trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json(
+        errorResponse({
+          message: 'Email wajib diisi.',
+        }),
+      );
+    }
+
+    const options = {};
+
+    if (process.env.EMAIL_REDIRECT_URL) {
+      options.emailRedirectTo = process.env.EMAIL_REDIRECT_URL;
+    }
+
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email,
+      options,
+    });
+
+    if (error) {
+      return res.status(400).json(
+        errorResponse({
+          message: error.message,
+        }),
+      );
+    }
+
+    return res.json(
+      successResponse({
+        message: 'Email verifikasi berhasil dikirim ulang. Cek Inbox atau Spam.',
+      }),
+    );
+  } catch (error) {
+    return res.status(500).json(
+      errorResponse({
+        message: error.message || 'Gagal mengirim ulang email verifikasi.',
+      }),
     );
   }
 };
